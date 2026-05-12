@@ -1,0 +1,6 @@
+{
+  "name": "PDF Studio",
+  "description": "A comprehensive web-based PDF tool to merge, split, rotate, and manipulate PDF files directly in your browser.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
