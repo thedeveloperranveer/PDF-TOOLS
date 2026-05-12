@@ -2,11 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { PDFDocument, degrees } from 'pdf-lib';
 import { 
   FileUp, Settings2, Download, RotateCw, SplitSquareVertical, 
-  Combine, Palette, Sun, Trash2, Eye, FileText, ChevronRight, Wand2
+  Combine, Palette, Trash2, Eye, FileText, ChevronRight, Wand2
 } from 'lucide-react';
 import { cn } from './lib/utils';
+import { rasterizePdfWithFilters } from './lib/rasterize';
 
-type Tool = 'merge' | 'split' | 'rotate' | 'grayscale' | 'invert' | 'filters';
+type Tool = 'merge' | 'split' | 'rotate' | 'effects';
 
 interface SplitRange {
   start: number;
@@ -28,6 +29,8 @@ export default function App() {
   const [maxPages, setMaxPages] = useState(1);
   const [cssFilter, setCssFilter] = useState<string>('');
   const [activeFilters, setActiveFilters] = useState({ grayscale: false, invert: false, sepia: false, contrast: false });
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -106,21 +109,18 @@ export default function App() {
     
     // For CSS filters, we don't need to rebuild the PDF for preview, just update the iframe visually
     // but we still want to load the original into the preview.
-    if (activeTool === 'grayscale' || activeTool === 'invert' || activeTool === 'filters') {
+    if (activeTool === 'effects') {
         processFilterPreview();
     } else {
         processPdf();
     }
   }, [files, rotateAngle, splitRange.start, splitRange.end, activeTool, activeFilters]);
 
-
   const processFilterPreview = async () => {
     if (files.length === 0) return;
     try {
         setIsProcessing(true);
-        if (activeTool === 'grayscale') setCssFilter('grayscale(100%)');
-        else if (activeTool === 'invert') setCssFilter('invert(100%) hue-rotate(180deg)');
-        else if (activeTool === 'filters') {
+        if (activeTool === 'effects') {
             const f = [];
             if (activeFilters.grayscale) f.push('grayscale(100%)');
             if (activeFilters.invert) f.push('invert(100%) hue-rotate(180deg)');
@@ -217,14 +217,30 @@ export default function App() {
   };
 
 
-  const downloadPdf = () => {
+  const downloadPdf = async () => {
     if (!downloadBlob) return;
-    
-    if (activeTool === 'grayscale' || activeTool === 'invert' || activeTool === 'filters') {
-        alert("Note: Grayscale and Invert are currently applied as visual preview filters in the browser. Downloading true rasterized color-filtered PDFs requires server-side processing which is not available in this client-only version. The downloaded file will be the original PDF.");
+
+    let finalBlobToDownload = downloadBlob;
+    const hasActiveFilters = activeTool === 'effects' && Object.values(activeFilters).some(v => v);
+
+    if (hasActiveFilters) {
+       setIsDownloading(true);
+       setDownloadProgress(0);
+       try {
+          const arrayBuffer = await finalBlobToDownload.arrayBuffer();
+          const rasterizedBytes = await rasterizePdfWithFilters(arrayBuffer, activeFilters, (progress) => {
+              setDownloadProgress(progress);
+          });
+          finalBlobToDownload = new Blob([rasterizedBytes], { type: 'application/pdf' });
+       } catch (err) {
+          console.error("Rasterization failed:", err);
+          alert("Failed to apply filters dynamically. Downloading the original file.");
+       } finally {
+          setIsDownloading(false);
+       }
     }
 
-    const url = URL.createObjectURL(downloadBlob);
+    const url = URL.createObjectURL(finalBlobToDownload);
     const a = document.createElement('a');
     a.href = url;
     a.download = `Studio_${activeTool}_${Date.now()}.pdf`;
@@ -234,14 +250,11 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-
   const tools = [
     { id: 'merge', icon: Combine, label: 'Merge' },
     { id: 'split', icon: SplitSquareVertical, label: 'Split' },
     { id: 'rotate', icon: RotateCw, label: 'Rotate' },
-    { id: 'filters', icon: Wand2, label: 'Multi-FX Toggles' },
-    { id: 'grayscale', icon: Sun, label: 'Grayscale' },
-    { id: 'invert', icon: Palette, label: 'Invert' },
+    { id: 'effects', icon: Palette, label: 'Effects & Filters' },
   ] as const;
 
   return (
@@ -330,7 +343,7 @@ export default function App() {
                         </div>
                     )}
 
-                    {activeTool === 'filters' && (
+                    {activeTool === 'effects' && (
                         <div className="space-y-3">
                             <label className="text-xs text-neutral-500 font-medium tracking-wide">Toggle Effects</label>
                             <div className="flex flex-col gap-2">
@@ -358,15 +371,10 @@ export default function App() {
                                     </button>
                                 ))}
                             </div>
+                            <p className="text-xs text-neutral-500 leading-relaxed mt-4">
+                                <span className="font-semibold text-amber-600">Note:</span> Applying effects will convert your PDF pages to images upon download to preserve the colors. Text will not be selectable.
+                            </p>
                         </div>
-                    )}
-
-                    {(activeTool === 'grayscale' || activeTool === 'invert' || activeTool === 'filters') && (
-                        <p className="text-xs text-neutral-500 leading-relaxed">
-                            A live preview filter is applied. 
-                            <br/><br/>
-                            <span className="font-semibold text-amber-600">Note:</span> Download will not retain these visual filters as they require complex server-side rasterization.
-                        </p>
                     )}
 
                     {activeTool === 'merge' && (
@@ -392,11 +400,20 @@ export default function App() {
 
       {/* Main Workspace */}
       <main className="flex-1 flex flex-col bg-neutral-100 relative">
-        {isProcessing && (
-            <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-20 flex items-center justify-center">
-                <div className="animate-spin text-indigo-600">
+        {(isProcessing || isDownloading) && (
+            <div className="absolute inset-0 bg-white/70 backdrop-blur-sm z-20 flex flex-col items-center justify-center">
+                <div className="animate-spin text-indigo-600 mb-4">
                     <RotateCw className="w-8 h-8" />
                 </div>
+                {isDownloading && (
+                    <div className="text-center font-medium text-indigo-800">
+                        <p>Processing High-Quality PDF...</p>
+                        <p className="text-sm mt-1">{downloadProgress}%</p>
+                        <div className="w-48 h-2 bg-indigo-100 rounded-full mt-3 overflow-hidden">
+                            <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${downloadProgress}%` }} />
+                        </div>
+                    </div>
+                )}
             </div>
         )}
 
