@@ -18,7 +18,8 @@ export async function rasterizePdfWithFilters(pdfBytes: ArrayBuffer, filters: Fi
   const newPdf = await PDFDocument.create();
   const totalPages = pdfSource.numPages;
   
-  // Reuse a single canvas for all pages to prevent memory leaks/black pages
+  // Reuse a SINGLE canvas to prevent exceeding browser canvas limits.
+  // willReadFrequently forces software rendering, avoiding GPU VRAM exhaustion (black pages)
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('Could not create canvas context');
@@ -26,12 +27,25 @@ export async function rasterizePdfWithFilters(pdfBytes: ArrayBuffer, filters: Fi
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
     const page = await pdfSource.getPage(pageNum);
     
-    // Scale for rendering (2.0 gives good quality balance, 3.0 gives better text but larger file)
-    const scale = 2.0; 
-    const viewport = page.getViewport({ scale });
+    // Scale for rendering
+    let scale = 1.5; 
+    let viewport = page.getViewport({ scale });
+    
+    // Safety check: Prevent massive memory consumption per page
+    // Keep max theoretical pixels under ~2.5 MP to prevent black renders on low RAM devices
+    const MAX_PIXELS = 2500000;
+    if (viewport.width * viewport.height > MAX_PIXELS) {
+        const baseViewport = page.getViewport({ scale: 1 });
+        scale = Math.sqrt(MAX_PIXELS / (baseViewport.width * baseViewport.height));
+        viewport = page.getViewport({ scale });
+    }
     
     canvas.width = viewport.width;
     canvas.height = viewport.height;
+    
+    // Fill white background to prevent transparent areas from becoming black in JPEG
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     
     const renderContext = {
       canvasContext: ctx,
@@ -80,9 +94,15 @@ export async function rasterizePdfWithFilters(pdfBytes: ArrayBuffer, filters: Fi
        ctx.putImageData(imgData, 0, 0);
     }
     
-    // Save image
-    const base64Jpeg = canvas.toDataURL('image/jpeg', 0.85);
-    const jpgImage = await newPdf.embedJpg(base64Jpeg);
+    // Use toBlob instead of toDataURL to prevent massive memory usage strings
+    const jpegBytes = await new Promise<Uint8Array>((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (!blob) return reject(new Error('Canvas toBlob failed'));
+            blob.arrayBuffer().then(buf => resolve(new Uint8Array(buf))).catch(reject);
+        }, 'image/jpeg', 0.85);
+    });
+    
+    const jpgImage = await newPdf.embedJpg(jpegBytes);
     
     // Add to new PDF with the ORIGINAL page dimensions
     const newPage = newPdf.addPage([viewport.width / scale, viewport.height / scale]);
@@ -96,11 +116,13 @@ export async function rasterizePdfWithFilters(pdfBytes: ArrayBuffer, filters: Fi
     // Cleanup resources for this page
     page.cleanup();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Small delay to allow Javascript garbage collector to clean up memory
+    await new Promise(r => setTimeout(r, 20));
 
     onProgress(Math.round((pageNum / totalPages) * 100));
   }
   
-  // Free the canvas memory explicitly
   canvas.width = 0;
   canvas.height = 0;
   await loadingTask.destroy();
