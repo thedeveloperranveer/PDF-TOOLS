@@ -5,7 +5,7 @@ import {
   Combine, Palette, Trash2, Eye, FileText, ChevronRight, Wand2
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { rasterizePdfWithFilters } from './lib/rasterize';
+import { rasterizePdfWithFilters } from './lib/clientRasterize';
 
 type Tool = 'merge' | 'split' | 'rotate' | 'effects';
 
@@ -223,7 +223,7 @@ export default function App() {
     let finalBlobToDownload = downloadBlob;
     const hasActiveFilters = activeTool === 'effects' && Object.values(activeFilters).some(v => v);
 
-    if (hasActiveFilters) {
+    if (hasActiveFilters && files.length > 0) {
        setIsDownloading(true);
        setDownloadProgress(0);
        try {
@@ -233,8 +233,8 @@ export default function App() {
           });
           finalBlobToDownload = new Blob([rasterizedBytes], { type: 'application/pdf' });
        } catch (err) {
-          console.error("Rasterization failed:", err);
-          alert("Failed to apply filters dynamically. Downloading the original file.");
+          console.error("Local rasterization processing failed:", err);
+          alert("Failed to apply filters locally. An error occurred. Downloading original.");
        } finally {
           setIsDownloading(false);
        }
