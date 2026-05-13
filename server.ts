@@ -2,9 +2,8 @@ import express from "express";
 import path from "path";
 import multer from "multer";
 import { PDFDocument } from 'pdf-lib';
-// Use legacy build for Node.js compatibility
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { createCanvas } from "canvas"; // Native canvas for Node
+import * as mupdf from "mupdf";
+import sharp from "sharp";
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -30,58 +29,29 @@ async function startServer() {
       const filters = JSON.parse(req.body.filters || '{}');
       const applyFilters = filters.grayscale || filters.invert || filters.sepia || filters.contrast;
       
-      const fileBytes = new Uint8Array(req.file.buffer);
+      const fileBytes = req.file.buffer;
       
-      // Load source PDF with pdf.js
-      const loadingTask = pdfjsLib.getDocument({ data: fileBytes });
-      const pdfSource = await loadingTask.promise;
-      const totalPages = pdfSource.numPages;
+      // Load source PDF with mupdf (WASM) - extremely fast and memory efficient
+      const doc = mupdf.Document.openDocument(fileBytes, "application/pdf");
+      const totalPages = doc.countPages();
 
       const newPdf = await PDFDocument.create();
-      
-      // Reuse native canvas
-      let canvas: any = null;
-      let ctx: any = null;
 
-      for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-        const page = await pdfSource.getPage(pageNum);
+      for (let pageNum = 0; pageNum < totalPages; pageNum++) {
+        const page = doc.loadPage(pageNum);
         
-        // Scale for rendering, bound by max pixels to prevent OOM
-        let scale = 2.0; 
-        let viewport = page.getViewport({ scale });
+        // Scale 1.5x for good quality ~150-200 DPI equivalent
+        const scaleMatrix = mupdf.Matrix.scale(1.5, 1.5);
+        const pixmap = page.toPixmap(scaleMatrix, mupdf.ColorSpace.DeviceRGB, true);
         
-        const MAX_PIXELS = 4000000; // ~4 MP limit for server rasterization
-        if (viewport.width * viewport.height > MAX_PIXELS) {
-            const baseViewport = page.getViewport({ scale: 1 });
-            scale = Math.sqrt(MAX_PIXELS / (baseViewport.width * baseViewport.height));
-            viewport = page.getViewport({ scale });
-        }
-
-        if (!canvas) {
-           canvas = createCanvas(viewport.width, viewport.height);
-           ctx = canvas.getContext("2d");
-        } else {
-           canvas.width = viewport.width;
-           canvas.height = viewport.height;
-        }
-
-        // Fill white background natively
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        const renderContext = {
-          canvasContext: ctx,
-          viewport: viewport,
-        };
-
-        await page.render(renderContext).promise;
+        let pixels = pixmap.getPixels();
+        const width = pixmap.getWidth();
+        const height = pixmap.getHeight();
 
         if (applyFilters) {
-          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const data = imgData.data;
-
-          for (let i = 0; i < data.length; i += 4) {
-            let r = data[i]; let g = data[i + 1]; let b = data[i + 2];
+          // Mutate the typed array directly
+          for (let i = 0; i < pixels.length; i += 4) {
+            let r = pixels[i]; let g = pixels[i + 1]; let b = pixels[i + 2];
             
             if (filters.grayscale) {
                const avg = 0.3 * r + 0.59 * g + 0.11 * b;
@@ -103,30 +73,36 @@ async function startServer() {
                b = Math.max(0, Math.min(255, factor * (b - 128) + 128));
             }
 
-            data[i] = r; data[i + 1] = g; data[i + 2] = b;
+            pixels[i] = r; pixels[i + 1] = g; pixels[i + 2] = b;
           }
-          ctx.putImageData(imgData, 0, 0);
         }
 
-        // Output to Buffer
-        const buffer = canvas.toBuffer("image/jpeg", { quality: 0.85 });
+        // Use sharp (libvips) to encode jpeg. Fast and no Canvas limits.
+        const buffer = await sharp(pixels, {
+          raw: {
+            width: width,
+            height: height,
+            channels: 4,
+          }
+        }).jpeg({ quality: 80 }).toBuffer();
+
         const jpgImage = await newPdf.embedJpg(buffer);
 
-        const newPage = newPdf.addPage([viewport.width / scale, viewport.height / scale]);
+        // Add back to PDF with exact logical boundaries
+        const logicalWidth = width / 1.5;
+        const logicalHeight = height / 1.5;
+
+        const newPage = newPdf.addPage([logicalWidth, logicalHeight]);
         newPage.drawImage(jpgImage, {
           x: 0,
           y: 0,
-          width: viewport.width / scale,
-          height: viewport.height / scale,
+          width: logicalWidth,
+          height: logicalHeight,
         });
-
-        page.cleanup(); // Clean up individual page
       }
 
-      await loadingTask.destroy();
       const finalPdfBytes = await newPdf.save();
       
-      // Return raw PDF binary to client
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", "attachment; filename=filtered.pdf");
       res.send(Buffer.from(finalPdfBytes));

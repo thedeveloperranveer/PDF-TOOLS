@@ -5,7 +5,6 @@ import {
   Combine, Palette, Trash2, Eye, FileText, ChevronRight, Wand2
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { rasterizePdfWithFilters } from './lib/clientRasterize';
 
 type Tool = 'merge' | 'split' | 'rotate' | 'effects';
 
@@ -30,7 +29,6 @@ export default function App() {
   const [cssFilter, setCssFilter] = useState<string>('');
   const [activeFilters, setActiveFilters] = useState({ grayscale: false, invert: false, sepia: false, contrast: false });
   const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState(0);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -55,7 +53,7 @@ export default function App() {
 
   const handleFileDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    const droppedFiles = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf');
+    const droppedFiles = Array.from(e.dataTransfer.files).filter((f: any) => f.type === 'application/pdf');
     if (activeTool === 'merge') {
       setFiles(prev => [...prev, ...droppedFiles]);
     } else {
@@ -69,7 +67,7 @@ export default function App() {
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const selectedFiles = Array.from(e.target.files).filter(f => f.type === 'application/pdf');
+      const selectedFiles = Array.from(e.target.files).filter((f: any) => f.type === 'application/pdf');
       if (activeTool === 'merge') {
         setFiles(prev => [...prev, ...selectedFiles]);
       } else {
@@ -225,16 +223,24 @@ export default function App() {
 
     if (hasActiveFilters && files.length > 0) {
        setIsDownloading(true);
-       setDownloadProgress(0);
        try {
-          const arrayBuffer = await finalBlobToDownload.arrayBuffer();
-          const rasterizedBytes = await rasterizePdfWithFilters(arrayBuffer, activeFilters, (progress) => {
-              setDownloadProgress(progress);
+          const formData = new FormData();
+          formData.append('pdf', files[0]);
+          formData.append('filters', JSON.stringify(activeFilters));
+
+          const response = await fetch('/api/process-pdf', {
+            method: 'POST',
+            body: formData,
           });
-          finalBlobToDownload = new Blob([rasterizedBytes], { type: 'application/pdf' });
+
+          if (!response.ok) {
+            throw new Error(`Server error: ${await response.text()}`);
+          }
+
+          finalBlobToDownload = await response.blob();
        } catch (err) {
-          console.error("Local rasterization processing failed:", err);
-          alert("Failed to apply filters locally. An error occurred. Downloading original.");
+          console.error("Server processing failed:", err);
+          alert("Server failed to process the PDF. Downloading original file.");
        } finally {
           setIsDownloading(false);
        }
@@ -407,11 +413,8 @@ export default function App() {
                 </div>
                 {isDownloading && (
                     <div className="text-center font-medium text-indigo-800">
-                        <p>Processing High-Quality PDF...</p>
-                        <p className="text-sm mt-1">{downloadProgress}%</p>
-                        <div className="w-48 h-2 bg-indigo-100 rounded-full mt-3 overflow-hidden">
-                            <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${downloadProgress}%` }} />
-                        </div>
+                        <p>Processing Fast High-Quality PDF...</p>
+                        <p className="text-sm mt-1 animate-pulse">This might take a few moments...</p>
                     </div>
                 )}
             </div>
