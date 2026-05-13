@@ -18,16 +18,17 @@ export async function rasterizePdfWithFilters(pdfBytes: ArrayBuffer, filters: Fi
   const newPdf = await PDFDocument.create();
   const totalPages = pdfSource.numPages;
   
+  // Reuse a single canvas for all pages to prevent memory leaks/black pages
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Could not create canvas context');
+  
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
     const page = await pdfSource.getPage(pageNum);
     
     // Scale for rendering (2.0 gives good quality balance, 3.0 gives better text but larger file)
     const scale = 2.0; 
     const viewport = page.getViewport({ scale });
-    
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) continue;
     
     canvas.width = viewport.width;
     canvas.height = viewport.height;
@@ -92,8 +93,17 @@ export async function rasterizePdfWithFilters(pdfBytes: ArrayBuffer, filters: Fi
       height: viewport.height / scale,
     });
 
+    // Cleanup resources for this page
+    page.cleanup();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
     onProgress(Math.round((pageNum / totalPages) * 100));
   }
+  
+  // Free the canvas memory explicitly
+  canvas.width = 0;
+  canvas.height = 0;
+  await loadingTask.destroy();
   
   return await newPdf.save();
 }
