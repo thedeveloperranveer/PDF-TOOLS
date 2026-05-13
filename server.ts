@@ -40,8 +40,9 @@ async function startServer() {
       for (let pageNum = 0; pageNum < totalPages; pageNum++) {
         const page = doc.loadPage(pageNum);
         
-        // Scale 1.5x for good quality ~150-200 DPI equivalent
-        const scaleMatrix = mupdf.Matrix.scale(1.5, 1.5);
+        // Scale 3.0x for High Quality (~300 DPI equivalent)
+        const scaleLayer = 3.0; // Dynamic scale layer
+        const scaleMatrix = mupdf.Matrix.scale(scaleLayer, scaleLayer);
         const pixmap = page.toPixmap(scaleMatrix, mupdf.ColorSpace.DeviceRGB, true);
         
         let pixels = pixmap.getPixels();
@@ -84,13 +85,13 @@ async function startServer() {
             height: height,
             channels: 4,
           }
-        }).jpeg({ quality: 80 }).toBuffer();
+        }).jpeg({ quality: 95 }).toBuffer(); // boosted quality to 95
 
         const jpgImage = await newPdf.embedJpg(buffer);
 
         // Add back to PDF with exact logical boundaries
-        const logicalWidth = width / 1.5;
-        const logicalHeight = height / 1.5;
+        const logicalWidth = width / scaleLayer;
+        const logicalHeight = height / scaleLayer;
 
         const newPage = newPdf.addPage([logicalWidth, logicalHeight]);
         newPage.drawImage(jpgImage, {
